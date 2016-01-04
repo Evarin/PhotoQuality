@@ -76,15 +76,15 @@ local function main(params)
 
    print('loadlabels')
    -- load labels
-   local flabels = io.open(params.train_labels, "r")
+   local flabels = assert(io.open(params.train_labels, "r"))
    local images = {}
    while true do
-      local line = io.read()
+      local line = flabels:read('*line')
       if line == nil then
 	 break
       end
-      local parts = line:split(';')
-      if not parts[1] == 'ID' then
+      local parts = line:split('\n')[1]:split(';')
+      if #parts == 2 and parts[1] ~= 'ID' then
 	 parts[1] = params.train_dir..parts[1]..'.jpg'
 	 parts[2] = tonumber(parts[2])
 	 table.insert(images, parts)
@@ -93,13 +93,14 @@ local function main(params)
 	 break
       end
    end
+   print("Training set: ", #images)
    flabels:close()
 
    -- Lists all the files from the test directory
    print('get test images')
    local test_images = {}
    for file in io.popen('find "'..params.test_dir..'" -maxdepth 1 -type f'):lines() do
-      print("found file "..file)
+      -- print("found file "..file)
       table.insert(test_images, file)
    end
 
@@ -169,15 +170,26 @@ local function main(params)
    end
    collectgarbage()
 
+   local img_size = params.image_size
    local qualitynet = nil
    local criterion = nn.MSECriterion()
+   local output = torch.Tensor(1)
+  if params.backend ~= 'clnn' then
+     output=output:cuda()
+     criterion:cuda()
+  else
+     output=output:cl()
+  end
+  
    for j=1, params.num_strides do
+      print("stride", j)
       shuffle(images)
+      local toterror = 0
       for i=1, #images do
 	 print('processing image '..i..': '..images[i][1])
 	 local img = image.load(images[i][1], 3)
 	 if img then
-	    -- img = image.scale(img, style_size, 'bilinear')
+	    img = image.scale(img, img_size, 'bilinear')
 	    local img_caffe = preprocess(img):float()
 	    if params.gpu >= 0 then
 	       if params.backend ~= 'clnn' then
@@ -197,12 +209,16 @@ local function main(params)
 	    end
 	    -- init (with good input sizes)
 	    if qualitynet == nil then
+	       local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
+	       print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
+	       print(res:nElement())
+	       print('Setting up network')
 	       qualitynet = nn.Sequential()
-	       qualitynet:add(nn.Linear(res:nElement(), 2048))
+	       qualitynet:add(nn.Linear(res:nElement(), 256))
 	       qualitynet:add(nn.ReLU())
-	       qualitynet:ann(nn.Linear(2048, 1024))
+	       qualitynet:add(nn.Linear(256, 256))
 	       qualitynet:add(nn.ReLU())
-	       qualitynet:add(nn.Linear(1024, 1))
+	       qualitynet:add(nn.Linear(256, 1))
 	       if params.gpu >= 0 then
 		  if params.backend ~= 'clnn' then
 		     qualitynet:cuda()
@@ -210,31 +226,50 @@ local function main(params)
 		     qualitynet:cl()
 		  end
 	       end
+	       local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
+	       print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
 	    end
-	    local output = torch.Tensor(1)
+	    
 	    output[1] = images[i][2]
+	    if params.backend ~= 'clnn' then
+             res:cuda()
+          else
+             res:cl()
+          end
 	    -- training
 	    local fwd = qualitynet:forward(res)
 	    criterion:forward(fwd, output)
-	    print('Note:', fwd[1], 'expected:', output[1])
+	    print('Note:', math.floor(fwd[1]+0.5), 'expected:', output[1], 'error:', math.floor(criterion.output+0.5))
 	    
+	    toterror = toterror +  criterion.output
 	    qualitynet:zeroGradParameters()
 	    qualitynet:backward(res, criterion:backward(qualitynet.output, output))
-	    qualitynet:updateParameters(0.01)
+	    qualitynet:updateParameters(1e-12)
 	 end
       end
+      print('Total error', toterror, '\n\n\n')
    end
 
-   torch.save(params.output_file, {net=qualitynet})
+    local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
+    print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
+
+   --print('saving network')
+   --torch.save(params.output_file, {net=qualitynet})
+   print('now testing')
    local fout = io.open(params.output_labels, 'w')
-   fout:write('ID;aesthetic score\n')
+   fout:write('ID;aesthetic_score\n')
    for i=1, #test_images do
       print('processing image '..i..': '..test_images[i])
+      collectgarbage()
+ --   local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
+ --   print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
       local img = image.load(test_images[i], 3)
       local nimg = test_images[i]:split('/')
-      nimg = nimg[#nimg]:split('.')[1]
+      nimg = nimg[#nimg]
+      nimg = nimg:sub(1, #nimg-4)
+
       if img then
-	 -- img = image.scale(img, style_size, 'bilinear')
+	 img = image.scale(img, img_size, 'bilinear')
 	 local img_caffe = preprocess(img):float()
 	 if params.gpu >= 0 then
 	    if params.backend ~= 'clnn' then
@@ -254,7 +289,8 @@ local function main(params)
 	 end
 	 
 	 local fwd = qualitynet:forward(res)
-	 fout:write(string.format("%s;%d\n", nimg, math.round(fwd[0])))
+	 print(nimg, fwd[1])
+	 fout:write(nimg..';'..math.min(100, math.max(0, math.floor(fwd[1]+0.5)))..'\r')
       end
    end
    fout:close()
@@ -262,7 +298,7 @@ end
 
 function shuffle(t)
    for i = #t, 2, -1 do
-      local j = rand(i)
+      local j = math.random(i)
       t[i], t[j] = t[j], t[i]
    end
 end
