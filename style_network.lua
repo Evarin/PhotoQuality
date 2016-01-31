@@ -16,14 +16,17 @@ cmd:option('-test_dir', 'test/')
 cmd:option('-train_labels', 'train_labels.csv')
 cmd:option('-image_size', 512, 'Maximum height / width of generated image')
 cmd:option('-gpu', 0, 'Zero-indexed ID of the GPU to use; for CPU mode set -gpu = -1')
+cmd:option('-input_file', '')
 
 -- Output options
 cmd:option('-output_file', 'network.data')
 cmd:option('-output_labels', 'test_results.csv')
 
 -- Other options
+cmd:option('-step_size', 1e-10)
 cmd:option('-style_scale', 1.0)
-cmd:option('-num_strides', 100)
+cmd:option('-num_strides', 1)
+cmd:option('-save_iter', 50001)
 cmd:option('-max_num_images', 1000000)
 cmd:option('-normalize_features', 'false')
 cmd:option('-pooling', 'max', 'max|avg')
@@ -62,16 +65,18 @@ local function main(params)
       cudnn.SpatialConvolution.accGradParameters = nn.SpatialConvolutionMM.accGradParameters -- ie: nop
    end
    
-   print('loadcaffe')
-   local loadcaffe_backend = params.backend
-   if params.backend == 'clnn' then loadcaffe_backend = 'nn' end
-   local cnn = loadcaffe.load(params.proto_file, params.model_file, loadcaffe_backend):float()
-   if params.gpu >= 0 then
-      if params.backend ~= 'clnn' then
-	 cnn:cuda()
-      else
-	 cnn:cl()
-      end
+   if params.input_file == '' then
+	   print('loadcaffe')
+	   local loadcaffe_backend = params.backend
+	   if params.backend == 'clnn' then loadcaffe_backend = 'nn' end
+	   local cnn = loadcaffe.load(params.proto_file, params.model_file, loadcaffe_backend):float()
+	   if params.gpu >= 0 then
+	      if params.backend ~= 'clnn' then
+		 cnn:cuda()
+	      else
+		 cnn:cl()
+	      end
+	   end
    end
 
    print('loadlabels')
@@ -109,69 +114,85 @@ local function main(params)
    local normalize_features = {}
 
    -- Set up the network, inserting style descriptor modules
-   local style_descrs = {}
-   local next_style_idx = 1
-   local net = nn.Sequential()
-   for i = 1, #cnn do
-      if next_style_idx <= #style_layers then
-	 local layer = cnn:get(i)
-	 local name = layer.name
-	 local layer_type = torch.type(layer)
-	 local is_pooling = (layer_type == 'cudnn.SpatialMaxPooling' or layer_type == 'nn.SpatialMaxPooling')
-	 if is_pooling and params.pooling == 'avg' then
-	    assert(layer.padW == 0 and layer.padH == 0)
-	    local kW, kH = layer.kW, layer.kH
-	    local dW, dH = layer.dW, layer.dH
-	    local avg_pool_layer = nn.SpatialAveragePooling(kW, kH, dW, dH):float()
-	    if params.gpu >= 0 then
-	       if params.backend ~= 'clnn' then
-		  avg_pool_layer:cuda()
-	       else
-		  avg_pool_layer:cl()
-	       end
-	    end
-	    local msg = 'Replacing max pooling at layer %d with average pooling'
-	    print(string.format(msg, i))
-	    net:add(avg_pool_layer)
-	 else
-	    net:add(layer)
-	 end
-	 if name == style_layers[next_style_idx] then
-	    local norm = (pnormalize_features[#pnormalize_features] == 'true')
-	    if #pnormalize_features >= next_style_idx then
-	       norm = (pnormalize_features[next_style_idx] == 'true')
-	    end
-	    table.insert(normalize_features, norm)
-	    print("Setting up style layer  ", i, ":", layer.name, 'normalize:', norm)
-	    local style_module = nn.StyleDescr(params.style_weight, norm):float()
-	    if params.gpu >= 0 then
-	       if params.backend ~= 'clnn' then
-		  style_module:cuda()
-	       else
-		  style_module:cl()
-	       end
-	    end
-	    net:add(style_module)
-	    table.insert(style_descrs, style_module)
-	    next_style_idx = next_style_idx + 1
-	 end
-      end
-   end
-
-   -- We don't need the base CNN anymore, so clean it up to save memory.
-   cnn = nil
-   for i=1,#net.modules do
-      local module = net.modules[i]
-      if torch.type(module) == 'nn.SpatialConvolutionMM' then
-	 -- remove these, not used, but uses gpu memory
-	 module.gradWeight = nil
-	 module.gradBias = nil
-      end
-   end
-   collectgarbage()
-
-   local img_size = params.image_size
    local qualitynet = nil
+   if params.input_file == '' then
+	print('reading caffe')
+	   local style_descrs = {}
+	   local next_style_idx = 1
+	   local net = nn.Sequential()
+	   for i = 1, #cnn do
+	      if next_style_idx <= #style_layers then
+		 local layer = cnn:get(i)
+		 local name = layer.name
+		 local layer_type = torch.type(layer)
+		 local is_pooling = (layer_type == 'cudnn.SpatialMaxPooling' or layer_type == 'nn.SpatialMaxPooling')
+		 if is_pooling and params.pooling == 'avg' then
+		    assert(layer.padW == 0 and layer.padH == 0)
+		    local kW, kH = layer.kW, layer.kH
+		    local dW, dH = layer.dW, layer.dH
+		    local avg_pool_layer = nn.SpatialAveragePooling(kW, kH, dW, dH):float()
+		    if params.gpu >= 0 then
+		       if params.backend ~= 'clnn' then
+			  avg_pool_layer:cuda()
+		       else
+			  avg_pool_layer:cl()
+		       end
+		    end
+		    local msg = 'Replacing max pooling at layer %d with average pooling'
+		    print(string.format(msg, i))
+		    net:add(avg_pool_layer)
+		 else
+		    net:add(layer)
+		 end
+		 if name == style_layers[next_style_idx] then
+		    local norm = (pnormalize_features[#pnormalize_features] == 'true')
+		    if #pnormalize_features >= next_style_idx then
+		       norm = (pnormalize_features[next_style_idx] == 'true')
+		    end
+		    table.insert(normalize_features, norm)
+		    print("Setting up style layer  ", i, ":", layer.name, 'normalize:', norm)
+		    local style_module = nn.StyleDescr(params.style_weight, norm):float()
+		    if params.gpu >= 0 then
+		       if params.backend ~= 'clnn' then
+			  style_module:cuda()
+		       else
+			  style_module:cl()
+		       end
+		    end
+		    net:add(style_module)
+		    table.insert(style_descrs, style_module)
+		    next_style_idx = next_style_idx + 1
+		 end
+	      end
+	   end
+
+	   -- We don't need the base CNN anymore, so clean it up to save memory.
+	   cnn = nil
+	   for i=1,#net.modules do
+	      local module = net.modules[i]
+	      if torch.type(module) == 'nn.SpatialConvolutionMM' then
+		 -- remove these, not used, but uses gpu memory
+		 module.gradWeight = nil
+		 module.gradBias = nil
+	      end
+	   end
+   else
+	print('opening network')
+	obj = torch.load(params.input_file)
+	qualitynet = obj.net
+	if params.gpu >= 0 then
+	  if params.backend ~= 'clnn' then
+	     qualitynet:cuda()
+	  else
+	     qualitynet:cl()
+	  end
+       end
+	obj = nil
+   end
+   
+   collectgarbage()
+   
+   local img_size = params.image_size
    local criterion = nn.MSECriterion()
    local output = torch.Tensor(1)
   if params.backend ~= 'clnn' then
@@ -245,7 +266,11 @@ local function main(params)
 	    toterror = toterror +  criterion.output
 	    qualitynet:zeroGradParameters()
 	    qualitynet:backward(res, criterion:backward(qualitynet.output, output))
-	    qualitynet:updateParameters(1e-12)
+	    qualitynet:updateParameters(params.step_size)
+	 end
+	 if i % params.save_iter then
+	   print('saving network')
+	   torch.save(params.output_file, {net=qualitynet})
 	 end
       end
       print('\n\n\nTotal error', toterror, '\n\n\n')
@@ -255,6 +280,12 @@ local function main(params)
 
     local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
     print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
+
+
+
+   print('saving network')
+   torch.save(params.output_file, {net=qualitynet})
+   
 
    print('now testing')
    local fout = io.open(params.output_labels, 'w')
