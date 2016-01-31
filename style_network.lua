@@ -187,6 +187,7 @@ local function main(params)
       local toterror = 0
       for i=1, #images do
 	 print('processing image '..i..': '..images[i][1])
+   collectgarbage()
 	 local img = image.load(images[i][1], 3)
 	 if img then
 	    img = image.scale(img, img_size, 'bilinear')
@@ -247,14 +248,14 @@ local function main(params)
 	    qualitynet:updateParameters(1e-12)
 	 end
       end
-      print('Total error', toterror, '\n\n\n')
+      print('\n\n\nTotal error', toterror, '\n\n\n')
+      print('saving network')
+     torch.save(params.output_file, {net=qualitynet})
    end
 
     local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
     print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
 
-   --print('saving network')
-   --torch.save(params.output_file, {net=qualitynet})
    print('now testing')
    local fout = io.open(params.output_labels, 'w')
    fout:write('ID;aesthetic_score\n')
