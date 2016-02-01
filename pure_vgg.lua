@@ -13,6 +13,7 @@ local cmd = torch.CmdLine()
 -- Basic options
 cmd:option('-train_dir', 'train/')
 cmd:option('-test_dir', 'test/')
+cmd:option('-test_template', 'test_template.csv')
 cmd:option('-train_labels', 'train_labels.csv')
 cmd:option('-image_size', 224, 'Maximum height / width of generated image')
 cmd:option('-gpu', 0, 'Zero-indexed ID of the GPU to use; for CPU mode set -gpu = -1')
@@ -107,13 +108,24 @@ local function main(params)
    print("Training set: ", #images)
    flabels:close()
 
-   -- Lists all the files from the test directory
-   print('get test images')
+   print('loadtest')
+   -- load test template
+   flabels = assert(io.open(params.test_template, "r"))
    local test_images = {}
-   for file in io.popen('find "'..params.test_dir..'" -maxdepth 1 -type f'):lines() do
-      -- print("found file "..file)
-      table.insert(test_images, file)
+   i0 = 0
+   while true do
+      local line = flabels:read('*line')
+      if line == nil or i0>100000 then
+	 break
+      end
+      i0 = i0+1
+      local parts = line:split('\n')[1]:split(';')
+      if #parts == 2 and parts[1] ~= 'ID' then
+	 table.insert(test_images, tonumber(parts[1]))
+      end
    end
+   print("Testing set: ", #test_images)
+   flabels:close()
 
    -- Set up the network, inserting style descriptor modules
    print('reading caffe')
@@ -280,8 +292,9 @@ local function main(params)
       collectgarbage()
  --   local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
  --   print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
-      local img = image.load(test_images[i], 3)
-      local nimg = test_images[i]:split('/')
+      local nimg = test_images[i]
+      local fname = string.format('%s%07d.jpg', params.test_dir, nimg)
+      local img = image.load(fname, 3)
       nimg = nimg[#nimg]
       nimg = nimg:sub(1, #nimg-4)
 
