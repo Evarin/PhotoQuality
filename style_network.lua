@@ -240,8 +240,10 @@ local function main(params)
 	       qualitynet = nn.Sequential()
 	       qualitynet:add(nn.Linear(res:nElement(), 256))
 	       qualitynet:add(nn.ReLU())
+	       qualitynet:add(nn.Dropout(0.5))
 	       qualitynet:add(nn.Linear(256, 256))
 	       qualitynet:add(nn.ReLU())
+	       qualitynet:add(nn.Dropout(0.5))
 	       qualitynet:add(nn.Linear(256, 1))
 	       if params.gpu >= 0 then
 		  if params.backend ~= 'clnn' then
