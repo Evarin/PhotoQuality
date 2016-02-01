@@ -14,7 +14,7 @@ local cmd = torch.CmdLine()
 cmd:option('-train_dir', 'train/')
 cmd:option('-test_dir', 'test/')
 cmd:option('-train_labels', 'train_labels.csv')
-cmd:option('-image_size', 400, 'Maximum height / width of generated image')
+cmd:option('-image_size', 224, 'Maximum height / width of generated image')
 cmd:option('-gpu', 0, 'Zero-indexed ID of the GPU to use; for CPU mode set -gpu = -1')
 cmd:option('-input_file', '')
 
@@ -27,6 +27,7 @@ cmd:option('-step_size', 1e-10)
 cmd:option('-style_scale', 1.0)
 cmd:option('-num_strides', 1)
 cmd:option('-save_iter', 50001)
+cmd:option('-start_iter', 1)
 cmd:option('-max_num_images', 1000000)
 cmd:option('-normalize_features', 'false')
 cmd:option('-pooling', 'max', 'max|avg')
@@ -65,6 +66,9 @@ local function main(params)
       cudnn.SpatialConvolution.accGradParameters = nn.SpatialConvolutionMM.accGradParameters -- ie: nop
    end
    
+   if params.seed >= 0 then
+      torch.manualSeed(params.seed)
+   end
 
    print('loadcaffe')
    local loadcaffe_backend = params.backend
@@ -141,16 +145,15 @@ local function main(params)
 	 end
 	 if name == params.content_layer then
 	    print("Setting up content layer  ", i, ":", layer.name)
-	    local style_module = nn.StyleDescr(params.style_weight, norm):float()
+	    local nlayer = nn.View(-1)
 	    if params.gpu >= 0 then
 	       if params.backend ~= 'clnn' then
-		  style_module:cuda()
+		  nlayer:cuda()
 	       else
-		  style_module:cl()
+		  nlayer:cl()
 	       end
 	    end
-	    net:add(style_module)
-	    table.insert(style_descrs, style_module)
+	    net:add(nlayer)
 	    add_layer = false
 	 end
       end
@@ -184,7 +187,7 @@ local function main(params)
    
    collectgarbage()
    
-   local img_size = 224
+   local img_size = params.image_size
    local criterion = nn.MSECriterion()
    local output = torch.Tensor(1)
    if params.backend ~= 'clnn' then
@@ -198,7 +201,7 @@ local function main(params)
       print("stride", j)
       shuffle(images)
       local toterror = 0
-      for i=1, #images do
+      for i=params.start_iter, #images do
 	 print('processing image '..i..': '..images[i][1])
 	 collectgarbage()
 	 local img = image.load(images[i][1], 3)
@@ -253,9 +256,9 @@ local function main(params)
 	    
 	 end
 	 if i % params.save_iter == 0 then
+	   print('\n\n\nTotal error', toterror/params.save_iter, '\n\n\n')
 	   print('saving network')
 	   torch.save(params.output_file, {net=qualitynet})
-	   print('\n\n\nTotal error', toterror/params.save_iter, '\n\n\n')
 	   toterror = 0
 	 end
       end
@@ -283,7 +286,7 @@ local function main(params)
       nimg = nimg:sub(1, #nimg-4)
 
       if img then
-	 img = image.scale(img, img_size, 'bilinear')
+	 img = image.scale(img, img_size, img_size, 'bilinear')
 	 local img_caffe = preprocess(img):float()
 	 if params.gpu >= 0 then
 	    if params.backend ~= 'clnn' then

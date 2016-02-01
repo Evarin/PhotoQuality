@@ -65,6 +65,9 @@ local function main(params)
       cudnn.SpatialConvolution.accGradParameters = nn.SpatialConvolutionMM.accGradParameters -- ie: nop
    end
    
+   if params.seed >= 0 then
+      torch.manualSeed(params.seed)
+   end
 
    print('loadcaffe')
    local loadcaffe_backend = params.backend
@@ -273,9 +276,9 @@ local function main(params)
 	    
 	 end
 	 if i % params.save_iter == 0 then
+	   print('\n\n\nTotal error', toterror/params.save_iter, '\n\n\n')
 	   print('saving network')
 	   torch.save(params.output_file, {net=qualitynet})
-	   print('\n\n\nTotal error', toterror/params.save_iter, '\n\n\n')
 	   toterror = 0
 	 end
       end
