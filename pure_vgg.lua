@@ -199,8 +199,8 @@ local function main(params)
       shuffle(images)
       local toterror = 0
       for i=1, #images do
-	 collectgarbage()
 	 print('processing image '..i..': '..images[i][1])
+	 collectgarbage()
 	 local img = image.load(images[i][1], 3)
 	 if img then
 	    img = image.scale(img, img_size, img_size, 'bilinear')
