@@ -167,15 +167,15 @@ local function main(params)
 	 end
 	 if name == params.content_layer then
 	    print("Setting up content layer  ", i, ":", layer.name)
-	    --local content_descr = nn.View(-1)
-	    --if params.gpu >= 0 then
-	    --   if params.backend ~= 'clnn' then
-	    --	  content_descr:cuda()
-	    --   else
-	    --	  content_descr:cl()
-	    --   end
-	    --end
-	    --net:add(content_descr)
+	    local content_descr = nn.View(-1)
+	    if params.gpu >= 0 then
+	       if params.backend ~= 'clnn' then
+	    	  content_descr:cuda()
+	       else
+	    	  content_descr:cl()
+	       end
+	    end
+	    net:add(content_descr)
 	    content_tocome = false
 	 end
 	 if name == style_layers[next_style_idx] then
@@ -216,7 +216,7 @@ local function main(params)
    if params.input_file ~= '' then
       print('loading network')
       obj = torch.load(params.input_file)
-      qualitynet, qualitylayers = buildNet(params, 0, obj.layers)
+      qualitynet, qualitylayers = buildNet(params, 0, 0, obj.layers)
       obj = nil
    end
    
@@ -253,34 +253,38 @@ local function main(params)
 	    end
 	    --local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
 	    --print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
-	    local res = net:forward(img_caffe)
-	    res = res:reshape(res:nElement())
+	    local res0 = net:forward(img_caffe)
+	    local res1 = nil
 	    for j, mod in ipairs(style_descrs) do
-	       res = res:cat(mod.G, 1)
+	       if res1 == nil
+		  res1 = mod.G:clone()
+	       else 
+	          res1 = res1:cat(mod.G, 1)
+	       end
 	    end
 	    
 	    -- init (with good input sizes)
 	    if qualitynet == nil then
-	       print(res:nElement())
+	       print(res0:nElement(), res1:nElement())
 	       print('Setting up network')
-	       qualitynet, qualitylayers = buildNet(params, res:nElement(), nil)
+	       qualitynet, qualitylayers = buildNet(params, res0:nElement(), res1:nElement(), nil)
 	    end
 	    
 	    output[1] = images[i][2]
 	    if params.backend ~= 'clnn' then
-	       res = res:cuda()
+	       res1 = res1:cuda()
 	    else
-	       res = res:cl()
+	       res1 = res1:cl()
 	    end
 	    
 	    -- training
-	    local fwd = qualitynet:forward(res)
+	    local fwd = qualitynet:forward{res0, res1}
 	    criterion:forward(fwd, output)
 	    print('Note:', math.floor(fwd[1]+0.5), 'expected:', output[1], 'error:', math.floor(criterion.output+0.5))
 	    
 	    toterror = toterror +  criterion.output
 	    qualitynet:zeroGradParameters()
-	    qualitynet:backward(res, criterion:backward(qualitynet.output, output))
+	    qualitynet:backward({res0, res1}, criterion:backward(qualitynet.output, output))
 	    qualitynet:updateParameters(params.step_size)
 	    
 	 end
@@ -325,12 +329,22 @@ local function main(params)
 	    end
 	 end
 	 
-	 local res = net:forward(img_caffe)
-	 res = res:reshape(res:nElement())
-	 for j, mod in ipairs(style_descrs) do
-            res = res:cat(mod.G, 1)
+	 local res0 = net:forward(img_caffe)
+         local res1 = nil
+         for j, mod in ipairs(style_descrs) do
+            if res1 == nil
+	       res1 = mod.G:clone()
+            else 
+	       res1 = res1:cat(mod.G, 1)
+            end
          end
-	 local fwd = qualitynet:forward(res)
+	 if params.backend ~= 'clnn' then
+	    res1 = res1:cuda()
+	 else
+	    res1 = res1:cl()
+	 end
+	    
+	 local fwd = qualitynet:forward{res0, res1}
 	 print(nimg, fwd[1])
 	 fout:write(nimg..';'..math.min(100, math.max(0, math.floor(fwd[1]+0.5)))..'\r')
       end
@@ -345,15 +359,19 @@ function shuffle(t)
    end
 end
 
-function buildNet(params, nElement, layers)
+function buildNet(params, nElement1, nElement2, layers)
    if layers == nil then
        layers = {}
-       table.insert(layers, nn.Linear(nElement, 512))
+       local l = nn.ParallelTable()
+       l:add(nn.Linear(nElement1, 512))
+       l:add(nn.Linear(nElement2, 512))
+       table.insert(layers, l)
        table.insert(layers, nn.Linear(512, 512))
        table.insert(layers, nn.Linear(512, 1))
    end
    qualitynet = nn.Sequential()
    qualitynet:add(layers[1])
+   qualitynet:add(nn.JoinTable(1))
    qualitynet:add(nn.ReLU())
    qualitynet:add(nn.Dropout(params.dropout))
    qualitynet:add(layers[2])
