@@ -38,7 +38,7 @@ cmd:option('-model_file', 'models/VGG_ILSVRC_19_layers.caffemodel')
 cmd:option('-backend', 'nn', 'nn|cudnn|clnn')
 cmd:option('-seed', -1)
 
-cmd:option('-content_layer', 'relu5_1', 'layer to learn from')
+cmd:option('-content_layer', 'pool5', 'layer to learn from')
 cmd:option('-style_layers', 'relu1_1,relu2_1,relu3_1,relu4_1', 'layers for style')
 
 
@@ -142,7 +142,7 @@ local function main(params)
    local net = nn.Sequential()
    local content_tocome = true
    for i = 1, #cnn do
-      if content_tocome and next_style_idx <= #style_layers then
+      if content_tocome or next_style_idx <= #style_layers then
 	 local layer = cnn:get(i)
 	 local name = layer.name
 	 local layer_type = torch.type(layer)
@@ -167,15 +167,15 @@ local function main(params)
 	 end
 	 if name == params.content_layer then
 	    print("Setting up content layer  ", i, ":", layer.name)
-	    local content_descr = nn.View(-1)
-	    if params.gpu >= 0 then
-	       if params.backend ~= 'clnn' then
-		  content_descr:cuda()
-	       else
-		  content_descr:cl()
-	       end
-	    end
-	    net:add(content_descr)
+	    --local content_descr = nn.View(-1)
+	    --if params.gpu >= 0 then
+	    --   if params.backend ~= 'clnn' then
+	    --	  content_descr:cuda()
+	    --   else
+	    --	  content_descr:cl()
+	    --   end
+	    --end
+	    --net:add(content_descr)
 	    content_tocome = false
 	 end
 	 if name == style_layers[next_style_idx] then
@@ -254,6 +254,7 @@ local function main(params)
 	    --local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
 	    --print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
 	    local res = net:forward(img_caffe)
+	    res = res:reshape(res:nElement())
 	    for j, mod in ipairs(style_descrs) do
 	       res = res:cat(mod.G, 1)
 	    end
@@ -325,6 +326,7 @@ local function main(params)
 	 end
 	 
 	 local res = net:forward(img_caffe)
+	 res = res:reshape(res:nElement())
 	 for j, mod in ipairs(style_descrs) do
             res = res:cat(mod.G, 1)
          end
@@ -343,12 +345,12 @@ function shuffle(t)
    end
 end
 
-function buildNet(params, nElements, layers)
-   if layers == nil
+function buildNet(params, nElement, layers)
+   if layers == nil then
        layers = {}
-       table.insert(layers, nn.Linear(nElement, 4096))
-       table.insert(layers, nn.Linear(4096, 2048))
-       table.insert(layers, nn.Linear(2048, 1)
+       table.insert(layers, nn.Linear(nElement, 512))
+       table.insert(layers, nn.Linear(512, 512))
+       table.insert(layers, nn.Linear(512, 1))
    end
    qualitynet = nn.Sequential()
    qualitynet:add(layers[1])
