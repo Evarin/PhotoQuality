@@ -103,7 +103,7 @@ local function main(params)
       if #parts == 2 and parts[1] ~= 'ID' then
 	 parts[1] = params.train_dir..parts[1]..'.jpg'
 	 parts[2] = tonumber(parts[2])
-	 if #images > params.max_num_images then
+	 if #images >= params.max_num_images then
 	    table.insert(fake_test, parts)
 	 else
 	    table.insert(images, parts)
@@ -248,7 +248,7 @@ local function main(params)
 	    
 	    toterror = toterror +  criterion.output
 	    qualitynet:zeroGradParameters()
-	    qualitynet:backward({res0, res1}, criterion:backward(qualitynet.output, output))
+	    qualitynet:backward(res, criterion:backward(qualitynet.output, output))
 	    qualitynet:updateParameters(params.step_size)
 	    
 	 end
@@ -269,10 +269,12 @@ local function main(params)
     print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
 
    print('now testing')
-   qualitynet:evaluate()
+   if qualitynet~= nil then
+      qualitynet:evaluate()
+   end
    local toterror =0
    for i=1, #fake_test do
-      print('processing image '..i..': '..fake_test[i])
+      print('processing image '..i..': '..fake_test[i][1])
       collectgarbage()
  --   local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
  --   print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
@@ -281,9 +283,13 @@ local function main(params)
 
       if img then
          local res = computeFeatures(params, img, style_net, style_descrs, content_net)
-	 
+	 if qualitynet == nil then
+	    print('Setting up network')
+	    qualitynet, qualitylayers = buildNet(params, res, qualitylayers)
+	    qualitynet:evaluate()
+	 end
 	 local fwd = qualitynet:forward(res)
-	 output[1] = images[i][2]
+	 output[1] = fake_test[i][2]
          criterion:forward(fwd, output)
 	 print('Note:', math.floor(fwd[1]+0.5), 'expected:', output[1], 'error:', math.floor(criterion.output+0.5))
 	 toterror = toterror + criterion.output
@@ -296,22 +302,16 @@ local function main(params)
    for i=1, #test_images do
       print('processing image '..i..': '..test_images[i])
       collectgarbage()
- --   local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
- --   print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
+  --  local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
+  --  print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
       local nimg = test_images[i]
       local fname = string.format('%s%07d.jpg', params.test_dir, nimg)
       local img = image.load(fname, 3)
-      nimg = nimg[#nimg]
-      nimg = nimg:sub(1, #nimg-4)
 
       if img then
          local res = computeFeatures(params, img, style_net, style_descrs, content_net)
-	 if params.backend ~= 'clnn' then
-	    res1 = res1:cuda()
-	 else
-	    res1 = res1:cl()
-	 end
-	 local fwd = qualitynet:forward{res0, res1}
+
+	 local fwd = qualitynet:forward(res)
 	 print(nimg, fwd[1])
 	 fout:write('\r'..nimg..';'..math.min(100, math.max(0, math.floor(fwd[1]+0.5)))) 
       end
@@ -331,25 +331,26 @@ function buildNet(params, res, layers)
    -- Transform Tables -> Tensor
    local j = nn.ParallelTable()
    local nEl = 0
-   for i = 1, #res[1] do
-      j.add(nn.View(-1))
+   for i = 1, #(res[1]) do
+      j:add(nn.View(-1))
       nEl = nEl + res[1][i]:nElement()
    end
    if layers == nil then
        layers = {}
        table.insert(layers, nn.Linear(nEl, 512))
        table.insert(layers, nn.Linear(res[2]:nElement(), 512))
+       table.insert(layers, nn.Linear(1024, 512))
        table.insert(layers, nn.Linear(512, 256))
-       table.insert(layers, nn.Linear(256, 256))
        table.insert(layers, nn.Linear(256, 1))
+       print(nEl, res[2]:nElement())
    end
    local k = nn.Sequential() -- transforms and learn on style
    k:add(j)
    k:add(nn.JoinTable(1))
    k:add(layers[1])
    local l = nn.ParallelTable()
-   l:add(layers[2])
    l:add(k)
+   l:add(layers[2])
    qualitynet:add(l)
    qualitynet:add(nn.JoinTable(1))
    -- Quality Network
@@ -373,16 +374,16 @@ function buildNet(params, res, layers)
 end
 
 function saveNetwork(name, layers)
-   for i=1, #layers do
-      layers[i].output = nil
-      layers[i].gradInput = nil
-   end
+--   for i=1, #layers do
+--      layers[i].output = nil
+--      layers[i].gradInput = nil
+--   end
    torch.save(name, {layers=layers})
 end
 
-function computeFeatures(params, image, style_net, style_descrs, content_net)
+function computeFeatures(params, imag, style_net, style_descrs, content_net)
    -- style features
-   local img = image.scale(image, params.style_size, 'bilinear')
+   local img = image.scale(imag, params.style_size, 'bilinear')
    local img_caffe = preprocess(img):float()
    if params.gpu >= 0 then
       if params.backend ~= 'clnn' then
@@ -391,15 +392,15 @@ function computeFeatures(params, image, style_net, style_descrs, content_net)
 	img_caffe = img_caffe:cl()
       end
    end
-   --local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
-   --print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
+--   local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
+--   print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
    style_net:forward(img_caffe)
-   local res = {{}, nil}
+   local res1 = {}
    for j, mod in ipairs(style_descrs) do
-      table.insert(res[1], mod.G)
+      table.insert(res1, mod.G)
    end
    -- content features
-   img = image.scale(image, params.content_size, params.content_size, 'bilinear')
+   img = image.scale(imag, params.content_size, params.content_size, 'bilinear')
    img_caffe = preprocess(img):float()
    if params.gpu >= 0 then
       if params.backend ~= 'clnn' then
@@ -408,9 +409,9 @@ function computeFeatures(params, image, style_net, style_descrs, content_net)
 	img_caffe = img_caffe:cl()
       end
    end
-   res[2] = content_net:forward(img_caffe)
+   local res2 = content_net:forward(img_caffe)
    
-   return res
+   return {res1, res2}
 end
 
 

@@ -256,7 +256,7 @@ local function main(params)
 	    local res0 = net:forward(img_caffe)
 	    local res1 = nil
 	    for j, mod in ipairs(style_descrs) do
-	       if res1 == nil
+	       if res1 == nil then
 		  res1 = mod.G:clone()
 	       else 
 	          res1 = res1:cat(mod.G, 1)
@@ -315,8 +315,6 @@ local function main(params)
       local nimg = test_images[i]
       local fname = string.format('%s%07d.jpg', params.test_dir, nimg)
       local img = image.load(fname, 3)
-      nimg = nimg[#nimg]
-      nimg = nimg:sub(1, #nimg-4)
 
       if img then
 	 img = image.scale(img, img_size, img_size, 'bilinear')
@@ -332,7 +330,7 @@ local function main(params)
 	 local res0 = net:forward(img_caffe)
          local res1 = nil
          for j, mod in ipairs(style_descrs) do
-            if res1 == nil
+            if res1 == nil then
 	       res1 = mod.G:clone()
             else 
 	       res1 = res1:cat(mod.G, 1)
@@ -366,8 +364,9 @@ function buildNet(params, nElement1, nElement2, layers)
        l:add(nn.Linear(nElement1, 512))
        l:add(nn.Linear(nElement2, 512))
        table.insert(layers, l)
-       table.insert(layers, nn.Linear(512, 512))
-       table.insert(layers, nn.Linear(512, 1))
+       table.insert(layers, nn.Linear(1024, 512))
+       table.insert(layers, nn.Linear(512, 256))
+       table.insert(layers, nn.Linear(256, 1))
    end
    qualitynet = nn.Sequential()
    qualitynet:add(layers[1])
@@ -378,6 +377,9 @@ function buildNet(params, nElement1, nElement2, layers)
    qualitynet:add(nn.ReLU())
    qualitynet:add(nn.Dropout(params.dropout))
    qualitynet:add(layers[3])
+   qualitynet:add(nn.ReLU())
+   qualitynet:add(nn.Dropout(params.dropout))
+   qualitynet:add(layers[4])
    if params.gpu >= 0 then
       if params.backend ~= 'clnn' then
           qualitynet:cuda()
