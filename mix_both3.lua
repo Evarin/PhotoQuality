@@ -272,6 +272,8 @@ local function main(params)
     print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
 
    print('now testing')
+   local fout = io.open('local_tests.csv', 'w')
+   fout:write('ID,result,expected')
    if qualitynet~= nil then
       qualitynet:evaluate()
    end
@@ -296,11 +298,13 @@ local function main(params)
          criterion:forward(fwd, output)
 	 print('Note:', math.floor(fwd[1]+0.5), 'expected:', output[1], 'error:', math.floor(criterion.output+0.5))
 	 toterror = toterror + criterion.output
+	 fout:write('\n'..nimg..','..math.min(100, math.max(0, math.floor(fwd[1]+0.5)))..','..output[1]) 
       end
    end
+   fout:close()
    print('\n\n\nExpected score:', toterror/(#fake_test), '\n\n\n')
    
-   local fout = io.open(params.output_labels, 'w')
+   fout = io.open(params.output_labels, 'w')
    fout:write('ID;aesthetic_score')
    for i=1, #test_images do
       print('processing image '..i..': '..test_images[i])
