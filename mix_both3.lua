@@ -348,7 +348,7 @@ function buildNet(params, res, layers)
        table.insert(layers, nn.Linear(res[2]:nElement(), 512))
        table.insert(layers, nn.Linear(1024, 512))
        table.insert(layers, nn.Linear(512, 512))
-       table.insert(layers, nn.Linear(64, 1))
+       table.insert(layers, nn.Linear(512, 32))
        print(nEl, res[2]:nElement())
    end
    local k = nn.Sequential() -- transforms and learn on style
@@ -367,10 +367,10 @@ function buildNet(params, res, layers)
    qualitynet:add(nn.ReLU())
    qualitynet:add(nn.Dropout(params.dropout))
    qualitynet:add(layers[4])
+   qualitynet:add(nn.ReLU())
    qualitynet:add(nn.Dropout(params.dropout))
-   qualitynet:add(nn.View(64,8))
-   qualitynet:add(nn.Max(2))
    qualitynet:add(layers[5])
+   qualitynet:add(nn.Max(1))
    if params.gpu >= 0 then
       if params.backend ~= 'clnn' then
           qualitynet:cuda()
