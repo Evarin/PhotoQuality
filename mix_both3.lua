@@ -370,7 +370,7 @@ function buildNet(params, res, layers)
    qualitynet:add(nn.ReLU())
    qualitynet:add(nn.Dropout(params.dropout))
    qualitynet:add(layers[5])
-   qualitynet:add(nn.Dropout(params.dropout))
+   qualitynet:add(nn.Dropout2(params.dropout))
    qualitynet:add(nn.Max(1))
    if params.gpu >= 0 then
       if params.backend ~= 'clnn' then
@@ -475,6 +475,47 @@ function StyleDescr:updateOutput(input)
    return self.output
 end
 
+local Dropout2, Parent = torch.class('nn.Dropout2', 'nn.Dropout')
+
+function Dropout2:__init(p,v1,inplace)
+   Parent.__init(self,p,v1,inplace)
+end
+
+function Dropout2:updateOutput(input)
+   if self.inplace then
+      self.output = input
+   else
+      self.output:resizeAs(input):copy(input)
+   end
+   if self.p > 0 then
+      if self.train then
+         self.noise:resizeAs(input)
+         self.noise:bernoulli(1-self.p)
+         self.output:cmul(self.noise)
+      end
+   end
+   return self.output
+end
+
+function Dropout2:updateGradInput(input, gradOutput)
+   if self.train then
+      if self.inplace then
+         self.gradInput = gradOutput
+      else
+         self.gradInput:resizeAs(gradOutput):copy(gradOutput)
+      end
+      if self.p > 0 then
+         self.gradInput:cmul(self.noise) -- simply mask the gradients with the noise vector
+      end
+   else
+      if self.inplace then
+         self.gradInput = gradOutput
+      else
+         self.gradInput:resizeAs(gradOutput):copy(gradOutput)
+      end
+   end
+   return self.gradInput
+end
 
 local params = cmd:parse(arg)
 main(params)
