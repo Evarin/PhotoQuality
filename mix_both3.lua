@@ -370,6 +370,7 @@ function buildNet(params, res, layers)
    qualitynet:add(nn.ReLU())
    qualitynet:add(nn.Dropout(params.dropout))
    qualitynet:add(layers[5])
+   qualitynet:add(nn.Dropout(params.dropout))
    qualitynet:add(nn.Max(1))
    if params.gpu >= 0 then
       if params.backend ~= 'clnn' then
