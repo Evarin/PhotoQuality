@@ -38,6 +38,7 @@ cmd:option('-proto_file', 'models/VGG_ILSVRC_19_layers_deploy.prototxt')
 cmd:option('-model_file', 'models/VGG_ILSVRC_19_layers.caffemodel')
 cmd:option('-backend', 'nn', 'nn|cudnn|clnn')
 cmd:option('-seed', -1)
+cmd:option('-print_memory', false)
 
 cmd:option('-content_layer', 'pool5', 'layer to learn from')
 cmd:option('-style_layers', 'relu1_1,relu2_1,relu3_1,relu4_1', 'layers for style')
@@ -344,9 +345,9 @@ function buildNet(params, res, layers)
    end
    if layers == nil then
        layers = {}
-       table.insert(layers, nn.Linear(nEl, 1024))
-       table.insert(layers, nn.Linear(res[2]:nElement(), 1024))
-       table.insert(layers, nn.Linear(2048, 1024))
+       table.insert(layers, nn.Linear(nEl, 512))
+       table.insert(layers, nn.Linear(res[2]:nElement(), 512))
+       table.insert(layers, nn.Linear(1024, 1024))
        table.insert(layers, nn.Linear(1024, 512))
        table.insert(layers, nn.Linear(512, 32))
        print(nEl, res[2]:nElement())
@@ -401,8 +402,10 @@ function computeFeatures(params, imag, style_net, style_descrs, content_net)
 	img_caffe = img_caffe:cl()
       end
    end
---   local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
---   print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
+   if params.print_memory then
+      local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
+      print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
+   end
    style_net:forward(img_caffe)
    local res1 = {}
    for j, mod in ipairs(style_descrs) do
