@@ -348,7 +348,7 @@ function buildNet(params, res, layers)
        table.insert(layers, nn.Linear(res[2]:nElement(), 512))
        table.insert(layers, nn.Linear(1024, 512))
        table.insert(layers, nn.Linear(512, 512))
-       table.insert(layers, nn.Linear(512, 32))
+       table.insert(layers, nn.Linear(512, 64))
        print(nEl, res[2]:nElement())
    end
    local k = nn.Sequential() -- transforms and learn on style
