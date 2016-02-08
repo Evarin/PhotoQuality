@@ -166,7 +166,7 @@ local function main(params)
 	    	  content_descr:cl()
 	       end
 	    end
-	    content_net:add(content_descr)
+--	    content_net:add(content_descr)
 	    content_tocome = false
 	 end
 	 if name == style_layers[next_style_idx] then
@@ -353,13 +353,16 @@ function buildNet(params, res, layers)
        table.insert(layers, nn.Linear(512, 32))
        print(nEl, res[2]:nElement())
    end
+   local m = nn.ParallelTable()
+   m:add(j)
+   m:add(nn.View(-1))
    local k = nn.Sequential() -- transforms and learn on style
-   k:add(j)
    k:add(nn.JoinTable(1))
    k:add(layers[1])
    local l = nn.ParallelTable()
    l:add(k)
    l:add(layers[2])
+   qualitynet:add(m)
    qualitynet:add(l)
    qualitynet:add(nn.JoinTable(1))
    -- Quality Network
