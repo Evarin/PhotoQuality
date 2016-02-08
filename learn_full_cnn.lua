@@ -144,30 +144,29 @@ local function main(params)
    local next_style_idx = 1
    local style_net = nn.Sequential()
    local content_net = nn.Sequential()
-   local content_net2 = nn.Sequential()
    local content_tocome = true
    for i = 1, #cnn do
       if content_tocome or next_style_idx <= #style_layers then
 	 local layer = cnn:get(i)
 	 local name = layer.name
 	 local layer_type = torch.type(layer)
+	 if content_tocome then
+	    content_net:add(layer)
+	 end
 	 if next_style_idx <= #style_layers then
 	    style_net:add(layer)
-	    content_net:add(layer)
-	 elseif content_tocome then
-	    content_net2:add(layer)
 	 end
 	 if name == params.content_layer then
 	    print("Setting up content layer  ", i, ":", layer.name)
 	    local content_descr = nn.View(-1)
 	    if params.gpu >= 0 then
 	       if params.backend ~= 'clnn' then
-		  content_descr:cuda()
+	    	  content_descr:cuda()
 	       else
-		  content_descr:cl()
+	    	  content_descr:cl()
 	       end
 	    end
-	    content_net2:add(content_descr)
+--	    content_net:add(content_descr)
 	    content_tocome = false
 	 end
 	 if name == style_layers[next_style_idx] then
@@ -194,7 +193,7 @@ local function main(params)
 
    -- We don't need the base CNN anymore, so clean it up to save memory.
    cnn = nil
-   for i=1, #content_net.modules do
+   for i=1,0 do --#content_net.modules do
       local module = content_net.modules[i]
       if torch.type(module) == 'nn.SpatialConvolutionMM' then
 	 -- remove these, not used, but uses gpu memory
@@ -241,7 +240,7 @@ local function main(params)
  	    -- init (with good input sizes)
 	    if qualitynet == nil then
 	       print('Setting up network')
-	       qualitynet, qualitylayers = buildNet(params, res, qualitylayers, content_net2)
+	       qualitynet, qualitylayers = buildNet(params, res, qualitylayers)
 	    end
 	    
 	    output[1] = images[i][2]
@@ -254,18 +253,21 @@ local function main(params)
 	    qualitynet:zeroGradParameters()
 	    grad = qualitynet:backward(res, criterion:backward(qualitynet.output, output))
 	    qualitynet:updateParameters(params.step_size)
+--	    collectgarbage()
+	    content_net:backward(res[2], grad[2])
+	    content_net:updateParameters(params.step_size*1e-10)
 	 end
 	 if i % params.save_iter == 0 then
 	   print('\n\n Previous scores', errors)
 	   print('\n\nTotal error', toterror/params.save_iter, '\n\n\n')
 	   table.insert(errors, toterror/params.save_iter)
 	   print('saving network')
-	   saveNetwork(params.output_file, qualitylayers, content_net2)
+	   saveNetwork(params.output_file, qualitylayers, content_net)
 	   toterror = 0
 	 end
       end
       print('saving network')
-      saveNetwork(params.output_file, qualitylayers, content_net2)
+      saveNetwork(params.output_file, qualitylayers, content_net)
    end
 
     local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
@@ -290,7 +292,7 @@ local function main(params)
          local res = computeFeatures(params, img, style_net, style_descrs, content_net)
 	 if qualitynet == nil then
 	    print('Setting up network')
-	    qualitynet, qualitylayers = buildNet(params, res, qualitylayers, content_net2)
+	    qualitynet, qualitylayers = buildNet(params, res, qualitylayers)
 	    qualitynet:evaluate()
 	 end
 	 local fwd = qualitynet:forward(res)
@@ -333,7 +335,7 @@ function shuffle(t)
    end
 end
 
-function buildNet(params, res, layers, content_net2)
+function buildNet(params, res, layers)
    local qualitynet = nn.Sequential()
    -- Transform Tables -> Tensor
    local j = nn.ParallelTable()
@@ -342,12 +344,10 @@ function buildNet(params, res, layers, content_net2)
       j:add(nn.View(-1))
       nEl = nEl + res[1][i]:nElement()
    end
-   -- Content
-   local res2b = content_net2:forward(res[2])
    if layers == nil then
        layers = {}
        table.insert(layers, nn.Linear(nEl, 1024))
-       table.insert(layers, nn.Linear(res2b:nElement(), 1024))
+       table.insert(layers, nn.Linear(res[2]:nElement(), 1024))
        table.insert(layers, nn.Linear(2048, 1024))
        table.insert(layers, nn.Linear(1024, 512))
        table.insert(layers, nn.Linear(512, 32))
@@ -355,7 +355,7 @@ function buildNet(params, res, layers, content_net2)
    end
    local m = nn.ParallelTable()
    m:add(j)
-   m:add(content_net2)
+   m:add(nn.View(-1))
    local k = nn.Sequential() -- transforms and learn on style
    k:add(nn.JoinTable(1))
    k:add(layers[1])
