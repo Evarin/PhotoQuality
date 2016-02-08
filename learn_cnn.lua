@@ -262,12 +262,12 @@ local function main(params)
 	   print('\n\nTotal error', toterror/params.save_iter, '\n\n\n')
 	   table.insert(errors, toterror/params.save_iter)
 	   print('saving network')
-	   saveNetwork(params.output_file, qualitylayers)
+	   saveNetwork(params.output_file, qualitylayers, content_net)
 	   toterror = 0
 	 end
       end
       print('saving network')
-      saveNetwork(params.output_file, qualitylayers)
+      saveNetwork(params.output_file, qualitylayers, content_net)
    end
 
     local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
@@ -384,12 +384,12 @@ function buildNet(params, res, layers)
    return qualitynet, layers
 end
 
-function saveNetwork(name, layers)
+function saveNetwork(name, layers, net)
 --   for i=1, #layers do
 --      layers[i].output = nil
 --      layers[i].gradInput = nil
 --   end
-   torch.save(name, {layers=layers})
+   torch.save(name, {layers=layers, onet=net})
 end
 
 function computeFeatures(params, imag, style_net, style_descrs, content_net)
