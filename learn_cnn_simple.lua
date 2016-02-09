@@ -145,7 +145,7 @@ local function main(params)
       print('loading network')
       obj = torch.load(params.input_file)
       qualitylayers = obj.layers
-      content_net2 = obj.net
+      content_net2 = obj.onet
       obj = nil
    end
    
