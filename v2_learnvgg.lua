@@ -38,6 +38,7 @@ cmd:option('-proto_file', 'models/VGG_ILSVRC_19_layers_deploy.prototxt')
 cmd:option('-model_file', 'models/VGG_ILSVRC_19_layers.caffemodel')
 cmd:option('-backend', 'nn', 'nn|cudnn|clnn')
 cmd:option('-seed', -1)
+cmd:option('-print_memory', false)
 
 cmd:option('-content_layer', 'pool5', 'layer to learn from')
 cmd:option('-style_layers', 'relu1_1,relu2_1,relu3_1,relu4_1', 'layers for style')
@@ -135,8 +136,6 @@ local function main(params)
    -- Set up the network, inserting style descriptor modules
    
    local style_layers = params.style_layers:split(",")
-   local pnormalize_features = params.normalize_features:split(",")
-   local normalize_features = {}
    
    local qualitynet = nil
    local qualitylayers = nil
@@ -172,7 +171,7 @@ local function main(params)
 	    content_tocome = false
 	 end
 	 if name == style_layers[next_style_idx] then
-	    print("Setting up style layer  ", i, ":", layer.name, 'normalize:', norm)
+	    print("Setting up style layer  ", i, ":", layer.name)
 	    table.insert(style_descrs, layer)
 	    next_style_idx = next_style_idx + 1
 	 end
@@ -204,14 +203,18 @@ local function main(params)
   
    if qualitynet == nil then
       local img = image.load(images[1][1], 3)
-      local res = computeFeatures(params, img, features_net, style_descrs)
+      local res = computeFeatures(params, style_descrs, features_net, {img})
       qualitynet = buildNet(params, res, content_net2)
    end
    
-   local errors = {}
    local batchSize = params.batch_size
    local targets = torch.Tensor(batchSize)
-   local offset = 0
+   if params.backend ~= 'clnn' then
+      targets = targets:cuda()
+   else
+      targets = targets:cl()
+   end
+   local offset = 1
    local totcount = 0
    local trainorder = torch.randperm(#images)
    local x, dl_dx
@@ -219,6 +222,7 @@ local function main(params)
    
    local feval = function(x_new)
        -- copy the weight if are changed
+       collectgarbage()
        if x ~= x_new then
            x:copy(x_new)
        end
@@ -233,30 +237,47 @@ local function main(params)
        for i = 1, batchSize do
           local fname = images[indices[i]][1]
           local iscore = images[indices[i]][2]
-	  table.insert(inputs, image.load(fname, 3)
+	  table.insert(inputs, image.load(fname, 3))
 	  targets[i] = iscore
        end
+       offset = offset + batchSize
        dl_dx:zero()
 
        -- evaluate the loss function and its derivative with respect to x, given a mini batch
        local features = computeFeatures(params, style_descrs, features_net, inputs)
+
        local prediction = qualitynet:forward(features)
+
+       print(prediction[1], targets[1])
+
+       if params.print_memory then
+	  local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
+	  print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
+       end
+
        local loss_x = criterion:forward(prediction, targets)
        
-       qualitynet:backward(inputs, criterion:backward(prediction, targets))
+       qualitynet:backward(features, criterion:backward(prediction, targets))
        
        return loss_x, dl_dx
    end
 
    print('learning')
-   local optim_params = {learningRate = 1e-4}
+   local optim_params = {learningRate = params.step_size}
    local niter = 1
+   local toterror = 0
+   local errors = {}
    while totcount <= #images * params.num_strides - params.batch_size do
       _, fs = optim.adam(feval, x, optim_params)
 
       print('Iteration', niter, 'offset', offset, 'error:', fs[1])
+      toterror = toterror + fs[1]
 
       if niter % params.save_iter == 0 then
+	 print(errors)
+	 print('Total error', toterror/params.save_iter)
+	 table.insert(errors, toterror/params.save_iter)
+	 toterror = 0
          torch.save(params.output_file, {net=qualitynet})
       end
       niter = niter + 1
@@ -273,13 +294,15 @@ local function main(params)
    for i=1, #fake_test do
       print('processing image '..i..': '..fake_test[i][1])
       collectgarbage()
- --   local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
- --   print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
+      if params.print_memory then
+	 local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
+	 print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
+      end
       local nimg = fake_test[i][1]
       local img = image.load(nimg, 3)
 
       if img then
-	 local features = computeFeatures(params, style_descrs, features_net, inputs)
+	 local features = computeFeatures(params, style_descrs, features_net, {img})
          local prediction = qualitynet:forward(features)
 	 output[1] = fake_test[i][2]
          criterion:forward(prediction, output)
@@ -301,7 +324,7 @@ local function main(params)
       local img = image.load(fname, 3)
 
       if img then
-	 local features = get_features(params, style_descrs, features_net, inputs)
+	 local features = computeFeatures(params, style_descrs, features_net, {img})
          local prediction = qualitynet:forward(features)
 	 print(nimg, prediction[1])
 	 fout:write('\r'..nimg..';'..math.min(100, math.max(0, math.floor(prediction[1]+0.5)))) 
@@ -324,29 +347,34 @@ function buildNet(params, res, content_net2)
    local nEl = 0
    for i = 1, #(res[1]) do
       local j = nn.Sequential()
-      if res[1][i]:size(1) > 256 then
-         j:add(nn.SpatialConvolutionMM(res[1][i]:size(1), 256, 1, 1)
+      local sz = res[1][i]:size(2)
+      if sz > 512 then --256 then
+	 local cv = nn.SpatialConvolutionMM(sz, 256, 1, 1)
+	 cv:reset(0.00001)
+         j:add(cv)
+	 sz = 256
       end
-      j:add(GramMatrix())
-      j:add(nn.View(-1))
-      nEl = nEl + res[1][i]:nElement()
+      j:add(GramMatrix(params.batch_size))
+      j:add(nn.View(sz*sz))
+      nEl = nEl + sz*sz
       pstyle:add(j)
    end
+   print(nEl)
    local lstyle = nn.Sequential()
    lstyle:add(pstyle)
-   lstyle:add(nn.JoinTable(1))
+   lstyle:add(nn.JoinTable(1, 1))
    lstyle:add(nn.Linear(nEl, 512))
    -- Content
    local res2b = content_net2:forward(res[2])
    local lcontent = content_net2
-   lcontent:add(nn.View(-1))
-   lcontent:add(nn.Linear(res2b:nElement(), 512)
+   lcontent:add(nn.View(res2b:nElement()))
+   lcontent:add(nn.Linear(res2b:nElement(), 512))
    -- Merge
    local merg = nn.ParallelTable()
    merg:add(lstyle)
    merg:add(lcontent)
    qualitynet:add(merg)
-   qualitynet:add(nn.JoinTable(1))
+   qualitynet:add(nn.JoinTable(1, 1))
    -- Quality Network
    qualitynet:add(nn.ReLU())
    qualitynet:add(nn.Dropout(params.dropout))
@@ -364,16 +392,25 @@ function buildNet(params, res, content_net2)
           qualitynet:cl()
       end
    end
-   return qualitynet, layers
+   return qualitynet
 end
 
-function get_features(params, data, images, features_net, style_descrs)
+function computeFeatures(params, style_descrs, features_net, images)
    -- style features
-   local imgs = torch.DoubleTensor(0, 3, params.style_size, params.style_size):zero()
-   for i=1, #images do
-      local im = image.scale(images[i], params.style_size, 'bilinear')
-      local img = preprocess(im):float():view(1,img:size(1),img:size(2),img:size(3)):expand(1, 3, params.style_size, params.style_size)
-      imgs:cat(img, 1)
+   local imgs 
+   if #images == 1 then
+      local im = image.scale(images[1], params.style_size, 'bilinear')
+      local img = preprocess(im):float()
+      imgs = img:view(1,img:size(1),img:size(2),img:size(3))
+   else
+      imgs = torch.FloatTensor(#images, 3, params.style_size, params.style_size):zero()
+      for i=1, #images do
+	 local im = image.scale(images[i], params.style_size, 'bilinear')
+	 local img = preprocess(im):float()
+	 img = img:view(1,img:size(1),img:size(2),img:size(3))
+	 local win = imgs:sub(i,i, 1,img:size(2), 1,img:size(3), 1,img:size(4))
+	 win:copy(img)
+      end
    end
    if params.gpu >= 0 then
       if params.backend ~= 'clnn' then
@@ -382,19 +419,25 @@ function get_features(params, data, images, features_net, style_descrs)
 	imgs = imgs:cl()
       end
    end
-   local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
-   print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
-   style_net:forward(imgs)
+   if params.print_memory then
+      local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
+      print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
+   end
+   features_net:forward(imgs)
    local res1 = {}
    for j, mod in ipairs(style_descrs) do
-      table.insert(res1, mod.G)
+      table.insert(res1, mod.output)
    end
    -- content features
-   imgs = torch.DoubleTensor(0, 3, params.style_size, params.style_size):zero()
+   imgs = nil
    for i=1, #images do
       local im = image.scale(images[i], params.content_size, params.content_size, 'bilinear')
-      local img = preprocess(im):float():view(1,img:size(1),img:size(2),img:size(3))
-      imgs:cat(img, 1)
+      local img = preprocess(im):float():view(1,3,params.content_size,params.content_size)
+      if imgs == nil then
+	 imgs = img
+      else
+	 imgs = imgs:cat(img, 1)
+      end
    end
    if params.gpu >= 0 then
       if params.backend ~= 'clnn' then
@@ -403,7 +446,7 @@ function get_features(params, data, images, features_net, style_descrs)
 	imgs = imgs:cl()
       end
    end
-   local res2 = content_net:forward(imgs)
+   local res2 = features_net:forward(imgs)
    
    return {res1, res2}
 end
@@ -424,14 +467,20 @@ end
 
 -- Returns a network that computes the CxC Gram matrix from inputs
 -- of size C x H x W
-function GramMatrix()
-  local net = nn.Sequential()
-  net:add(nn.View(-1):setNumInputDims(2))
-  local concat = nn.ConcatTable()
-  concat:add(nn.Identity())
-  concat:add(nn.Identity())
-  net:add(concat)
-  net:add(nn.MM(false, true))
+function GramMatrix(batchSize)
+  local net = nn.Concat(1)
+  for i=1, batchSize do
+     local subNet = nn.Sequential()
+     subNet:add(nn.Select(1, i))
+     subNet:add(nn.View(-1):setNumInputDims(2))
+     subNet:add(nn.Replicate(1, 1))
+     local concat = nn.ConcatTable()
+     concat:add(nn.Identity())
+     concat:add(nn.Identity())
+     subNet:add(concat)
+     subNet:add(nn.MM(false, true))
+     net:add(subNet)
+  end
   return net
 end
 
