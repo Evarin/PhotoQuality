@@ -31,6 +31,7 @@ cmd:option('-dropout', 0.5)
 cmd:option('-num_strides', 1)
 cmd:option('-save_iter', 2000)
 cmd:option('-start_iter', 1)
+cmd:option('-batch_size', 5)
 cmd:option('-max_num_images', 45000)
 cmd:option('-pooling', 'max', 'max|avg')
 cmd:option('-proto_file', 'models/VGG_ILSVRC_19_layers_deploy.prototxt')
@@ -208,11 +209,11 @@ local function main(params)
    end
    
    local errors = {}
-   local batchSize = 10
-   local offset = 0;
-   local nextBatch = function ()
-   end
-   
+   local batchSize = params.batch_size
+   local targets = torch.Tensor(batchSize)
+   local offset = 0
+   local totcount = 0
+   local trainorder = torch.randperm(#images)
    local x, dl_dx
    x, dl_dx = qualitynet:getParameters()
    
@@ -221,7 +222,20 @@ local function main(params)
        if x ~= x_new then
            x:copy(x_new)
        end
-       local inputs, targets = nextBatch()
+       
+       if offset + batchSize > #images then
+          trainorder = torch.randperm(#images)
+	  offset = 1
+       end
+       
+       local indices = trainorder:narrow(1, offset, batchSize)
+       local inputs = {}
+       for i = 1, batchSize do
+          local fname = images[indices[i]][1]
+          local iscore = images[indices[i]][2]
+	  table.insert(inputs, image.load(fname, 3)
+	  targets[i] = iscore
+       end
        dl_dx:zero()
 
        -- evaluate the loss function and its derivative with respect to x, given a mini batch
@@ -236,17 +250,16 @@ local function main(params)
 
    print('learning')
    local optim_params = {learningRate = 1e-4}
-   for j = 1, params.num_strides do
-      for i = 1, #images do
-         _, fs = optim.adam(feval, x, optim_params)
+   local niter = 1
+   while totcount <= #images * params.num_strides - params.batch_size do
+      _, fs = optim.adam(feval, x, optim_params)
 
-         print('Image', i, 'error:', fs[1])
+      print('Iteration', niter, 'offset', offset, 'error:', fs[1])
 
-         if i % params.save_iter == 0 then
-            torch.save(params.output_file, {net=qualitynet})
-         end
+      if niter % params.save_iter == 0 then
+         torch.save(params.output_file, {net=qualitynet})
       end
-      torch.save(params.output_file, {net=qualitynet})
+      niter = niter + 1
    end
 
    print('now testing')
