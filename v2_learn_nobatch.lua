@@ -202,8 +202,10 @@ local function main(params)
    local target = torch.Tensor(1)
    if params.backend ~= 'clnn' then
       target = target:cuda()
+      criterion:cuda()
    else
       target = target:cl()
+      criterion:cuda()
    end
    local offset = 1
    local totcount = 0
@@ -224,20 +226,20 @@ local function main(params)
        end
        
        local indices = trainorder[offset]
-       local fname = images[indices[i]][1]
-       local iscore = images[indices[i]][2]
+       local fname = images[indices][1]
+       local iscore = images[indices][2]
 
        local img = image.load(fname, 3)
        target[1] = iscore
        offset = offset + 1
        dl_dx:zero()
 
-       -- evaluate the loss function and its derivative with respect to x, given a mini batch
+       -- evaluate the loss function and its derivative with respect to x
        local features = computeFeatures(params, style_descrs, features_net, img)
 
        local prediction = qualitynet:forward(features)
 
-       print(prediction[1], target[1])
+       print('prediction', math.ceil(prediction[1]), 'objective',  target[1])
 
        if params.print_memory then
 	  local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
@@ -256,11 +258,12 @@ local function main(params)
    local niter = 1
    local toterror = 0
    local errors = {}
-   while totcount <= #images * params.num_strides - params.batch_size do
+   while totcount <= #images * params.num_strides do
       _, fs = optim.adam(feval, x, optim_params)
 
-      print('Iteration', niter, 'offset', offset, 'error:', fs[1])
+      print('Iteration', niter, 'offset', offset, 'error:', math.floor(fs[1]+0.5))
       toterror = toterror + fs[1]
+      totcount = totcount + 1
 
       if niter % params.save_iter == 0 then
 	 print(errors)
@@ -280,6 +283,7 @@ local function main(params)
    end
    local toterror =0
    local output = torch.Tensor(1)
+   output = output:cuda()
    for i=1, #fake_test do
       print('processing image '..i..': '..fake_test[i][1])
       collectgarbage()
@@ -337,7 +341,8 @@ function buildNet(params, res, content_net2)
    for i = 1, #(res[1]) do
       local j = nn.Sequential()
       local sz = res[1][i]:size(1)
-      if sz > 512 then --256 then
+      if sz > 256 then
+	 print('reduce size', sz)
 	 local cv = nn.SpatialConvolutionMM(sz, 256, 1, 1)
 	 cv:reset(0.00001)
          j:add(cv)
@@ -406,7 +411,7 @@ function computeFeatures(params, style_descrs, features_net, imag)
       table.insert(res1, mod.output)
    end
    -- content features
-   im = image.scale(images[i], params.content_size, params.content_size, 'bilinear')
+   im = image.scale(imag, params.content_size, params.content_size, 'bilinear')
    imgs = preprocess(im):float()
    if params.gpu >= 0 then
       if params.backend ~= 'clnn' then
@@ -439,6 +444,7 @@ end
 function GramMatrix(batchSize)
   local net = nn.Sequential()
   net:add(nn.View(-1):setNumInputDims(2))
+  net:add(nn.Normalize(2))
   local concat = nn.ConcatTable()
   concat:add(nn.Identity())
   concat:add(nn.Identity())
@@ -446,6 +452,34 @@ function GramMatrix(batchSize)
   net:add(nn.MM(false, true))
   return net
 end
+
+
+-- Define an nn Module to compute style description (Gram Matrix) in-place
+local StyleDescr, parent = torch.class('nn.StyleDescr', 'nn.Module')
+
+function StyleDescr:__init(strength)
+   parent.__init(self)
+   self.strength = strength or 1
+   
+   self.gram = GramMatrix(self.normalize)
+   self.G = nil
+end
+
+function StyleDescr:updateOutput(input)
+   self.G = torch.triu(self.gram:forward(input))
+   self.G:div(input:nElement())
+
+   self.output = input
+   return self.output
+end
+
+function StyleDescr:updateGradInput(input, gradOutput)
+  self.gradInput = self.gram:backward(input, gradOutput)
+  self.gradInput:div(input:nElement())
+  self.gradInput:mul(self.strength)
+  return self.gradInput
+end
+
 
 local params = cmd:parse(arg)
 main(params)
