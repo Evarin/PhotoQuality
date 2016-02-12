@@ -472,8 +472,8 @@ function StyleDescr:updateOutput(input)
    self.G = torch.triu(self.gram:forward(input))
    self.G:div(input:nElement())
 
-   self.output = input
-   return self.output
+   self.output = self.G
+   return self.G
 end
 
 function StyleDescr:updateGradInput(input, gradOutput)
