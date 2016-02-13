@@ -38,6 +38,7 @@ cmd:option('-model_file', 'models/VGG_ILSVRC_19_layers.caffemodel')
 cmd:option('-backend', 'nn', 'nn|cudnn|clnn')
 cmd:option('-seed', -1)
 cmd:option('-print_memory', false)
+cmd:option('-flip', false)
 
 cmd:option('-content_layer', 'pool5', 'layer to learn from')
 cmd:option('-style_layers', 'relu1_1,relu2_1,relu3_1,relu4_1', 'layers for style')
@@ -230,6 +231,9 @@ local function main(params)
        local iscore = images[indices][2]
 
        local img = image.load(fname, 3)
+       if params.flip then
+	  img = image.hflip(img)
+       end
        target[1] = iscore
        offset = offset + 1
        dl_dx:zero()
@@ -249,6 +253,11 @@ local function main(params)
        local loss_x = criterion:forward(prediction, target)
        
        qualitynet:backward(features, criterion:backward(prediction, target))
+
+       if params.print_memory then
+	  local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
+	  print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
+       end
        
        return loss_x, dl_dx
    end
@@ -261,7 +270,7 @@ local function main(params)
    while totcount <= #images * params.num_strides do
       _, fs = optim.adam(feval, x, optim_params)
 
-      print('Iteration', niter, 'offset', offset, 'error:', math.floor(fs[1]+0.5))
+      print('Iteration '..niter, '                       error:', math.floor(fs[1]+0.5))
       toterror = toterror + fs[1]
       totcount = totcount + 1
 
@@ -273,6 +282,9 @@ local function main(params)
          torch.save(params.output_file, {net=qualitynet})
       end
       niter = niter + 1
+   end
+   if params.num_strides > 0 then
+      torch.save(params.output_file, {net=qualitynet})
    end
 
    print('now testing')
@@ -380,7 +392,8 @@ function buildNet(params, res, content_net2)
    qualitynet:add(nn.Linear(512, 512))
    qualitynet:add(nn.ReLU())
    qualitynet:add(nn.Dropout(params.dropout))
-   qualitynet:add(nn.Linear(512, 1))
+   qualitynet:add(nn.Linear(512, 64))
+   qualitynet:add(nn.Max(1))
    if params.gpu >= 0 then
       if params.backend ~= 'clnn' then
           qualitynet:cuda()
