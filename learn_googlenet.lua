@@ -32,13 +32,12 @@ cmd:option('-num_strides', 1)
 cmd:option('-save_iter', 2000)
 cmd:option('-start_iter', 1)
 cmd:option('-max_num_images', 45000)
+cmd:option('-normalize_features', 'false')
 cmd:option('-pooling', 'max', 'max|avg')
 cmd:option('-proto_file', 'models/VGG_ILSVRC_19_layers_deploy.prototxt')
 cmd:option('-model_file', 'models/VGG_ILSVRC_19_layers.caffemodel')
 cmd:option('-backend', 'nn', 'nn|cudnn|clnn')
 cmd:option('-seed', -1)
-cmd:option('-print_memory', false)
-cmd:option('-flip', false)
 
 cmd:option('-content_layer', 'pool5', 'layer to learn from')
 cmd:option('-style_layers', 'relu1_1,relu2_1,relu3_1,relu4_1', 'layers for style')
@@ -136,13 +135,19 @@ local function main(params)
    -- Set up the network, inserting style descriptor modules
    
    local style_layers = params.style_layers:split(",")
+   local pnormalize_features = params.normalize_features:split(",")
+   local normalize_features = {}
    
    local qualitynet = nil
    local qualitylayers = nil
+   local content_net2 = nil
+   local style_net2 = nil
    if params.input_file ~= '' then
       print('loading network')
       obj = torch.load(params.input_file)
-      qualitynet = obj.net
+      qualitylayers = obj.layers
+      content_net2 = obj.cnet
+      style_net2 = obj.snet
       obj = nil
    end
    
@@ -150,9 +155,9 @@ local function main(params)
    local style_descrs = {}
    local content_descr = nil
    local next_style_idx = 1
-   local features_net = nn.Sequential()
-   local content_tocome = (qualitynet == nil)
-   local content_net2 = nil
+   local style_net = nn.Sequential()
+   local content_net = nn.Sequential()
+   local content_tocome = (content_net2==nil)
    if content_tocome then
       content_net2 = nn.Sequential()
    end
@@ -162,17 +167,41 @@ local function main(params)
 	 local name = layer.name
 	 local layer_type = torch.type(layer)
 	 if next_style_idx <= #style_layers then
-	    features_net:add(layer)
+	    style_net:add(layer)
+	    content_net:add(layer)
 	 elseif content_tocome then
 	    content_net2:add(layer)
 	 end
 	 if name == params.content_layer then
 	    print("Setting up content layer  ", i, ":", layer.name)
+	    local content_descr = nn.View(-1)
+	    if params.gpu >= 0 then
+	       if params.backend ~= 'clnn' then
+		  content_descr:cuda()
+	       else
+		  content_descr:cl()
+	       end
+	    end
+	    content_net2:add(content_descr)
 	    content_tocome = false
 	 end
 	 if name == style_layers[next_style_idx] then
-	    print("Setting up style layer  ", i, ":", layer.name)
-	    table.insert(style_descrs, layer)
+	    local norm = (pnormalize_features[#pnormalize_features] == 'true')
+	    if #pnormalize_features >= next_style_idx then
+	       norm = (pnormalize_features[next_style_idx] == 'true')
+	    end
+	    table.insert(normalize_features, norm)
+	    print("Setting up style layer  ", i, ":", layer.name, 'normalize:', norm)
+	    local style_module = nn.StyleDescr(params.style_weight, norm):float()
+	    if params.gpu >= 0 then
+	       if params.backend ~= 'clnn' then
+		  style_module:cuda()
+	       else
+		  style_module:cl()
+	       end
+	    end
+	    style_net:add(style_module)
+	    table.insert(style_descrs, style_module)
 	    next_style_idx = next_style_idx + 1
 	 end
       end
@@ -180,8 +209,8 @@ local function main(params)
 
    -- We don't need the base CNN anymore, so clean it up to save memory.
    cnn = nil
-   for i=1, #features_net.modules do
-      local module = features_net.modules[i]
+   for i=1, #content_net.modules do
+      local module = content_net.modules[i]
       if torch.type(module) == 'nn.SpatialConvolutionMM' then
 	 -- remove these, not used, but uses gpu memory
 	 module.gradWeight = nil
@@ -193,106 +222,60 @@ local function main(params)
    
    local img_size = params.image_size
    local criterion = nn.MSECriterion()
-  
-   if qualitynet == nil then
-      local img = image.load(images[1][1], 3)
-      local res = computeFeatures(params, style_descrs, features_net, img)
-      qualitynet = buildNet(params, res, content_net2)
-   else
-      for i=1, #qualitynet.modules do
-         local module = qualitynet.modules[i]
-         if torch.type(module) == 'nn.Dropout' then
-             module:setp(params.dropout)
-         end
-      end
-   end
-   
-   local target = torch.Tensor(1)
+   local output = torch.Tensor(1)
    if params.backend ~= 'clnn' then
-      target = target:cuda()
+      output = output:cuda()
       criterion:cuda()
    else
-      target = target:cl()
-      criterion:cuda()
+      output=output:cl()
    end
-   local offset = 1
-   local totcount = 0
-   local trainorder = torch.randperm(#images)
-   local x, dl_dx
-   x, dl_dx = qualitynet:getParameters()
-   
-   local feval = function(x_new)
-       -- copy the weight if are changed
-       collectgarbage()
-       if x ~= x_new then
-           x:copy(x_new)
-       end
-       
-       if offset > #images then
-          trainorder = torch.randperm(#images)
-	  offset = 1
-       end
-       
-       local indices = trainorder[offset]
-       local fname = images[indices][1]
-       local iscore = images[indices][2]
-
-       local img = image.load(fname, 3)
-       if params.flip then
-	  img = image.hflip(img)
-       end
-       target[1] = iscore
-       offset = offset + 1
-       dl_dx:zero()
-
-       -- evaluate the loss function and its derivative with respect to x
-       local features = computeFeatures(params, style_descrs, features_net, img)
-
-       local prediction = qualitynet:forward(features)
-
-       print('prediction', math.ceil(prediction[1]), 'objective',  target[1])
-
-       if params.print_memory then
-	  local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
-	  print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
-       end
-
-       local loss_x = criterion:forward(prediction, target)
-       
-       qualitynet:backward(features, criterion:backward(prediction, target))
-
-       if params.print_memory then
-	  local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
-	  print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
-       end
-       
-       return loss_x, dl_dx
-   end
-
-   print('learning')
-   local optim_params = {learningRate = params.step_size}
-   local niter = 1
-   local toterror = 0
+  
    local errors = {}
-   while totcount <= #images * params.num_strides do
-      _, fs = optim.adam(feval, x, optim_params)
-
-      print('Iteration '..niter, '                       error:', math.floor(fs[1]+0.5))
-      toterror = toterror + fs[1]
-      totcount = totcount + 1
-
-      if niter % params.save_iter == 0 then
-	 print(errors)
-	 print('Total error', toterror/params.save_iter)
-	 table.insert(errors, toterror/params.save_iter)
-	 toterror = 0
-         torch.save(params.output_file, {net=qualitynet})
+   for j=1, params.num_strides do
+      print("stride", j)
+      if j>1 then
+         params.start_iter = 1
       end
-      niter = niter + 1
+      shuffle(images)
+      local toterror = 0
+      for i=params.start_iter, #images do
+	 print('processing image '..i..': '..images[i][1])
+	 collectgarbage()
+	 local img = image.load(images[i][1], 3)
+	 if img then
+	    local res = computeFeatures(params, img, style_net, style_descrs, content_net)
+ 	    -- init (with good input sizes)
+	    if qualitynet == nil then
+	       print('Setting up network')
+	       qualitynet, qualitylayers = buildNet(params, res, qualitylayers, content_net2)
+	    end
+	    
+	    output[1] = images[i][2]
+	    -- training
+	    local fwd = qualitynet:forward(res)
+	    criterion:forward(fwd, output)
+	    print('Note:', math.floor(fwd[1]+0.5), 'expected:', output[1], 'error:', math.floor(criterion.output+0.5))
+	    
+	    toterror = toterror +  criterion.output
+	    qualitynet:zeroGradParameters()
+	    grad = qualitynet:backward(res, criterion:backward(qualitynet.output, output))
+	    qualitynet:updateParameters(params.step_size)
+	 end
+	 if i % params.save_iter == 0 then
+	   print('\n\n Previous scores', errors)
+	   print('\n\nTotal error', toterror/params.save_iter, '\n\n\n')
+	   table.insert(errors, toterror/params.save_iter)
+	   print('saving network')
+	   saveNetwork(params.output_file, qualitylayers, content_net2)
+	   toterror = 0
+	 end
+      end
+      print('saving network')
+      saveNetwork(params.output_file, qualitylayers, content_net2)
    end
-   if params.num_strides > 0 then
-      torch.save(params.output_file, {net=qualitynet})
-   end
+
+    local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
+    print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
 
    print('now testing')
    local fout = io.open('local_tests.csv', 'w')
@@ -301,26 +284,27 @@ local function main(params)
       qualitynet:evaluate()
    end
    local toterror =0
-   local output = torch.Tensor(1)
-   output = output:cuda()
    for i=1, #fake_test do
       print('processing image '..i..': '..fake_test[i][1])
       collectgarbage()
-      if params.print_memory then
-	 local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
-	 print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
-      end
+ --   local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
+ --   print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
       local nimg = fake_test[i][1]
       local img = image.load(nimg, 3)
 
       if img then
-	 local features = computeFeatures(params, style_descrs, features_net, img)
-         local prediction = qualitynet:forward(features)
+         local res = computeFeatures(params, img, style_net, style_descrs, content_net)
+	 if qualitynet == nil then
+	    print('Setting up network')
+	    qualitynet, qualitylayers = buildNet(params, res, qualitylayers, content_net2)
+	    qualitynet:evaluate()
+	 end
+	 local fwd = qualitynet:forward(res)
 	 output[1] = fake_test[i][2]
-         criterion:forward(prediction, output)
-	 print('Note:', math.floor(prediction[1]+0.5), 'expected:', output[1], 'error:', math.floor(criterion.output+0.5))
+         criterion:forward(fwd, output)
+	 print('Note:', math.floor(fwd[1]+0.5), 'expected:', output[1], 'error:', math.floor(criterion.output+0.5))
 	 toterror = toterror + criterion.output
-	 fout:write('\n'..nimg..','..math.min(100, math.max(0, math.floor(prediction[1]+0.5)))..','..output[1]) 
+	 fout:write('\n'..nimg..','..math.min(100, math.max(0, math.floor(fwd[1]+0.5)))..','..output[1]) 
       end
    end
    fout:close()
@@ -331,15 +315,18 @@ local function main(params)
    for i=1, #test_images do
       print('processing image '..i..': '..test_images[i])
       collectgarbage()
+  --  local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
+  --  print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
       local nimg = test_images[i]
       local fname = string.format('%s%07d.jpg', params.test_dir, nimg)
       local img = image.load(fname, 3)
 
       if img then
-	 local features = computeFeatures(params, style_descrs, features_net, img)
-         local prediction = qualitynet:forward(features)
-	 print(nimg, prediction[1])
-	 fout:write('\r'..nimg..';'..math.min(100, math.max(0, math.floor(prediction[1]+0.5)))) 
+         local res = computeFeatures(params, img, style_net, style_descrs, content_net)
+
+	 local fwd = qualitynet:forward(res)
+	 print(nimg, fwd[1])
+	 fout:write('\r'..nimg..';'..math.min(100, math.max(0, math.floor(fwd[1]+0.5)))) 
       end
    end
    fout:close()
@@ -352,55 +339,50 @@ function shuffle(t)
    end
 end
 
-function buildNet(params, res, content_net2)
+function buildNet(params, res, layers, content_net2)
    local qualitynet = nn.Sequential()
-   -- Style
-   local pstyle = nn.ParallelTable()
+   -- Transform Tables -> Tensor
+   local j = nn.ParallelTable()
    local nEl = 0
    for i = 1, #(res[1]) do
-      local j = nn.Sequential()
-      local sz = res[1][i]:size(1)
-      local cgrad = false
-      if sz > 256 then
-	 print('reduce size', sz)
-	 local cv = nn.SpatialConvolutionMM(sz, 256, 1, 1)
-	 cv:reset(0.00001)
-         j:add(cv)
-	 sz = 256
-	 cgrad = true
-      end
-      j:add(nn.StyleDescr(cgrad))
-      j:add(nn.View(sz*sz))
-      nEl = nEl + sz*sz
-      pstyle:add(j)
+      j:add(nn.View(-1))
+      nEl = nEl + res[1][i]:nElement()
    end
-   print(nEl)
-   local lstyle = nn.Sequential()
-   lstyle:add(pstyle)
-   lstyle:add(nn.JoinTable(1, 1))
-   lstyle:add(nn.Linear(nEl, 512))
    -- Content
    local res2b = content_net2:forward(res[2])
-   local lcontent = content_net2
-   lcontent:add(nn.View(res2b:nElement()))
-   lcontent:add(nn.Linear(res2b:nElement(), 512))
-   -- Merge
-   local merg = nn.ParallelTable()
-   merg:add(lstyle)
-   merg:add(lcontent)
-   qualitynet:add(merg)
-   qualitynet:add(nn.JoinTable(1, 1))
+   if layers == nil then
+       layers = {}
+       table.insert(layers, nn.Linear(nEl, 512))
+       table.insert(layers, nn.Linear(res2b:nElement(), 512))
+       table.insert(layers, nn.Linear(1024, 1024))
+       table.insert(layers, nn.Linear(1024, 512))
+       table.insert(layers, nn.Linear(512, 1))
+       print(nEl, res2b:nElement())
+   end
+   local m = nn.ParallelTable()
+   m:add(j)
+   m:add(content_net2)
+   local k = nn.Sequential() -- transforms and learn on style
+   k:add(nn.JoinTable(1))
+   k:add(layers[1])
+   local l = nn.ParallelTable()
+   l:add(k)
+   l:add(layers[2])
+   qualitynet:add(m)
+   qualitynet:add(l)
+   qualitynet:add(nn.JoinTable(1))
    -- Quality Network
    qualitynet:add(nn.ReLU())
    qualitynet:add(nn.Dropout(params.dropout))
-   qualitynet:add(nn.Linear(1024, 512))
+   qualitynet:add(layers[3])
    qualitynet:add(nn.ReLU())
    qualitynet:add(nn.Dropout(params.dropout))
-   qualitynet:add(nn.Linear(512, 512))
+   qualitynet:add(layers[4])
    qualitynet:add(nn.ReLU())
    qualitynet:add(nn.Dropout(params.dropout))
-   qualitynet:add(nn.Linear(512, 64))
-   qualitynet:add(nn.Max(1))
+   qualitynet:add(layers[5])
+--   qualitynet:add(nn.Dropout2(params.dropout))
+--   qualitynet:add(nn.Max(1))
    if params.gpu >= 0 then
       if params.backend ~= 'clnn' then
           qualitynet:cuda()
@@ -408,41 +390,46 @@ function buildNet(params, res, content_net2)
           qualitynet:cl()
       end
    end
-   return qualitynet
+   return qualitynet, layers
 end
 
-function computeFeatures(params, style_descrs, features_net, imag)
+function saveNetwork(name, layers, net)
+--   for i=1, #layers do
+--      layers[i].output = nil
+--      layers[i].gradInput = nil
+--   end
+   torch.save(name, {layers=layers, onet=net})
+end
+
+function computeFeatures(params, imag, style_net, style_descrs, content_net)
    -- style features
-   local imgs
-   local im = image.scale(imag, params.style_size, 'bilinear')
-   imgs = preprocess(im):float()
+   local img = image.scale(imag, params.style_size, 'bilinear')
+   local img_caffe = preprocess(img):float()
    if params.gpu >= 0 then
       if params.backend ~= 'clnn' then
-	imgs = imgs:cuda()
+	img_caffe = img_caffe:cuda()
       else
-	imgs = imgs:cl()
+	img_caffe = img_caffe:cl()
       end
    end
-   if params.print_memory then
-      local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
-      print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
-   end
-   features_net:forward(imgs)
+--   local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
+--   print('Memory: ', freeMemory/1024/1024, 'MB free of ', totalMemory/1024/1024)
+   style_net:forward(img_caffe)
    local res1 = {}
    for j, mod in ipairs(style_descrs) do
-      table.insert(res1, mod.output)
+      table.insert(res1, mod.G)
    end
    -- content features
-   im = image.scale(imag, params.content_size, params.content_size, 'bilinear')
-   imgs = preprocess(im):float()
+   img = image.scale(imag, params.content_size, params.content_size, 'bilinear')
+   img_caffe = preprocess(img):float()
    if params.gpu >= 0 then
       if params.backend ~= 'clnn' then
-	imgs = imgs:cuda()
+	img_caffe = img_caffe:cuda()
       else
-	imgs = imgs:cl()
+	img_caffe = img_caffe:cl()
       end
    end
-   local res2 = features_net:forward(imgs)
+   local res2 = content_net:forward(img_caffe)
    
    return {res1, res2}
 end
@@ -463,10 +450,12 @@ end
 
 -- Returns a network that computes the CxC Gram matrix from inputs
 -- of size C x H x W
-function GramMatrix(batchSize)
+function GramMatrix(normalize)
   local net = nn.Sequential()
   net:add(nn.View(-1):setNumInputDims(2))
---  net:add(nn.Normalize(2))
+  if normalize then
+    net:add(nn.Normalize(2))
+  end
   local concat = nn.ConcatTable()
   concat:add(nn.Identity())
   concat:add(nn.Identity())
@@ -479,34 +468,65 @@ end
 -- Define an nn Module to compute style description (Gram Matrix) in-place
 local StyleDescr, parent = torch.class('nn.StyleDescr', 'nn.Module')
 
-function StyleDescr:__init(cgrad)
+function StyleDescr:__init(strength, normalize)
    parent.__init(self)
-   self.strength = 1
-   self.cgrad = cgrad or false
+   self.strength = strength
+   self.normalize = normalize or false
    
-   self.gram = GramMatrix()
+   self.gram = GramMatrix(self.normalize)
    self.G = nil
 end
 
 function StyleDescr:updateOutput(input)
    self.G = torch.triu(self.gram:forward(input))
-   self.G:div(input:nElement())
-
-   self.output = self.G
-   return self.G
+   if not self.normalize then
+     self.G:div(input:nElement())
+   end
+   self.output = input
+   return self.output
 end
 
-function StyleDescr:updateGradInput(input, gradOutput)
-  if not self.cgrad then
-    self.gradInput = self.gradOutput
-    return self.gradInput
-  end
-  self.gradInput = self.gram:backward(input, gradOutput)
-  self.gradInput:div(input:nElement())
-  self.gradInput:mul(self.strength)
-  return self.gradInput
+local Dropout2, Parent = torch.class('nn.Dropout2', 'nn.Dropout')
+
+function Dropout2:__init(p,v1,inplace)
+   Parent.__init(self,p,v1,inplace)
 end
 
+function Dropout2:updateOutput(input)
+   if self.inplace then
+      self.output = input
+   else
+      self.output:resizeAs(input):copy(input)
+   end
+   if self.p > 0 then
+      if self.train then
+         self.noise:resizeAs(input)
+         self.noise:bernoulli(1-self.p)
+         self.output:cmul(self.noise)
+      end
+   end
+   return self.output
+end
+
+function Dropout2:updateGradInput(input, gradOutput)
+   if self.train then
+      if self.inplace then
+         self.gradInput = gradOutput
+      else
+         self.gradInput:resizeAs(gradOutput):copy(gradOutput)
+      end
+      if self.p > 0 then
+         self.gradInput:cmul(self.noise) -- simply mask the gradients with the noise vector
+      end
+   else
+      if self.inplace then
+         self.gradInput = gradOutput
+      else
+         self.gradInput:resizeAs(gradOutput):copy(gradOutput)
+      end
+   end
+   return self.gradInput
+end
 
 local params = cmd:parse(arg)
 main(params)
