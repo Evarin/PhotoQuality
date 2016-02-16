@@ -38,6 +38,7 @@ cmd:option('-proto_file', 'models/VGG_ILSVRC_19_layers_deploy.prototxt')
 cmd:option('-model_file', 'models/VGG_ILSVRC_19_layers.caffemodel')
 cmd:option('-backend', 'nn', 'nn|cudnn|clnn')
 cmd:option('-seed', -1)
+cmd:option('-flip', false)
 
 cmd:option('-content_layer', 'pool5', 'layer to learn from')
 cmd:option('-style_layers', 'relu1_1,relu2_1,relu3_1,relu4_1', 'layers for style')
@@ -241,6 +242,9 @@ local function main(params)
 	 collectgarbage()
 	 local img = image.load(images[i][1], 3)
 	 if img then
+	    if params.flip then
+	       image.hflip(img, img)
+	    end
 	    local res = computeFeatures(params, img, style_net, style_descrs, content_net)
  	    -- init (with good input sizes)
 	    if qualitynet == nil then
