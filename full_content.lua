@@ -191,10 +191,13 @@ local function main(params)
    
    local batchSize = params.batch_size
    local targets = torch.Tensor(batchSize)
+   local output = torch.Tensor(1)
    if params.backend ~= 'clnn' then
       targets = targets:cuda()
+      output = output:cuda()
    else
       targets = targets:cl()
+      output = output:cl()
    end
    local offset = 1
    local totcount = 0
@@ -230,7 +233,9 @@ local function main(params)
 
        local prediction = qualitynet:forward(features)
 
-       print(prediction[1], targets[1])
+       for i=1, batchSize do
+	  print('prediction', math.floor(prediction[i][1]), 'expected', targets[i])
+       end
 
        if params.print_memory then
 	  local freeMemory, totalMemory = cutorch.getMemoryUsage(params.gpu+1)
@@ -272,7 +277,6 @@ local function main(params)
       qualitynet:evaluate()
    end
    local toterror =0
-   local output = torch.Tensor(1)
    for i=1, #fake_test do
       print('processing image '..i..': '..fake_test[i][1])
       collectgarbage()
@@ -324,10 +328,11 @@ end
 
 function buildNet(params, res, content_net2)
    local qualitynet = nn.Sequential()
-   local res2b = content_net2:forward(res[2])
+   local res2b = content_net2:forward(res)
    local lcontent = content_net2
+   print(res2b:nElement())
    lcontent:add(nn.View(res2b:nElement()))
-   lcontent:add(nn.Linear(res2b:nElement(), 512))
+   lcontent:add(nn.Linear(res2b:nElement(), 1024))
    -- Merge
    qualitynet:add(lcontent)
    -- Quality Network
