@@ -38,8 +38,8 @@ cmd:option('-backend', 'nn', 'nn|cudnn|clnn')
 cmd:option('-seed', -1)
 cmd:option('-print_memory', false)
 
-cmd:option('-content_layer', 'pool5', 'layer to learn from')
-cmd:option('-style_layers', 'relu1_1,relu2_1', 'layers for style')
+cmd:option('-content_layer', 37, 'layer to learn from') -- pool5
+cmd:option('-style_layers', '2,7', 'layers for style') -- relu1_1, relu2_1
 
 
 function nn.SpatialConvolutionMM:accGradParameters()
@@ -73,10 +73,9 @@ local function main(params)
       torch.manualSeed(params.seed)
    end
 
-   print('loadcaffe')
-   local net = nil
+   print('loadbasenet')
    local obj = torch.load(params.model_file)
-   net = obj.net
+   local cnn = obj.net:get(1)
    obj = nil
    
    print('loadlabels')
@@ -143,10 +142,12 @@ local function main(params)
    local style_net = nn.Sequential()
    local content_net = nn.Sequential()
    local content_tocome = true
+   print(#cnn)
    for i = 1, #cnn do
       if content_tocome or next_style_idx <= #style_layers then
 	 local layer = cnn:get(i)
 	 local name = layer.name
+	 print(i)
 	 local layer_type = torch.type(layer)
 	 if next_style_idx <= #style_layers then
 	    style_net:add(layer)
@@ -154,11 +155,11 @@ local function main(params)
 	 if content_tocome then
 	    content_net:add(layer)
 	 end
-	 if name == params.content_layer then
+	 if i == params.content_layer then
 	    print("Setting up content layer  ", i, ":", layer.name)
 	    content_tocome = false
 	 end
-	 if name == style_layers[next_style_idx] then
+	 if i == tonumber(style_layers[next_style_idx]) then
 	    print("Setting up style layer  ", i, ":", layer.name)
 	    table.insert(style_descrs, layer)
 	    next_style_idx = next_style_idx + 1
@@ -359,6 +360,7 @@ function buildNet(params, res)
    lstyle:add(nn.JoinTable(1, 1))
    lstyle:add(nn.Linear(nEl, 512))
    -- Content
+   local lcontent = nn.Sequential()
    local res2b = res[2]
    lcontent:add(nn.View(res2b:nElement()))
    lcontent:add(nn.Linear(res2b:nElement(), 512))
