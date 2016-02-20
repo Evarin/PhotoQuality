@@ -227,7 +227,7 @@ local function main(params)
        local iscore = images[indices][2]
 
        local img = image.load(fname, 3)
-       if params.flip then
+       if params.flip and math.random(2) == 1 then
 	  img = image.hflip(img)
        end
        target[1] = iscore
@@ -288,6 +288,12 @@ local function main(params)
    fout:write('ID,result,expected')
    if qualitynet~= nil then
       qualitynet:evaluate()
+      for i=1, #qualitynet.modules do
+         local module = qualitynet.modules[i]
+         if torch.type(module) == 'nn.Dropout' then
+             module:setp(0)
+         end
+      end
    end
    local toterror =0
    local output = torch.Tensor(1)
