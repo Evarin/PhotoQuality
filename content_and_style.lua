@@ -162,7 +162,14 @@ local function main(params)
 	 end
 	 if i == tonumber(style_layers[next_style_idx]) then
 	    print("Setting up style layer  ", i, ":", layer.name)
-	    table.insert(style_descrs, layer)
+	    local nlayer = nn.StyleDescr(false)
+	    if params.backend ~= 'clnn' then
+		nlayer:cuda()
+	    else
+		nlayer:cl()
+	    end
+	    style_net:add(nlayer)
+	    table.insert(style_descrs, nlayer)
 	    next_style_idx = next_style_idx + 1
 	 end
       end
@@ -228,7 +235,7 @@ local function main(params)
        local iscore = images[indices][2]
 
        local img = image.load(fname, 3)
-       if params.flip then
+       if params.flip and math.random(2) == 1 then
 	  img = image.hflip(img)
        end
        target[1] = iscore
@@ -289,6 +296,12 @@ local function main(params)
    fout:write('ID,result,expected')
    if qualitynet~= nil then
       qualitynet:evaluate()
+      for i=1, #qualitynet.modules do
+         local module = qualitynet.modules[i]
+         if torch.type(module) == 'nn.Dropout' then
+             module:setp(0)
+         end
+      end
    end
    local toterror =0
    local output = torch.Tensor(1)
@@ -350,7 +363,6 @@ function buildNet(params, res)
    for i = 1, #(res[1]) do
       local j = nn.Sequential()
       local sz = res[1][i]:size(1)
-      j:add(nn.StyleDescr(false))
       j:add(nn.View(sz*sz))
       nEl = nEl + sz*sz
       pstyle:add(j)
@@ -472,8 +484,8 @@ function StyleDescr:updateOutput(input)
    self.G = torch.triu(self.gram:forward(input))
    self.G:div(input:nElement())
 
-   self.output = self.G
-   return self.G
+   self.output = input
+   return self.output
 end
 
 function StyleDescr:updateGradInput(input, gradOutput)
