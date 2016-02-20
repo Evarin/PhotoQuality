@@ -422,7 +422,7 @@ function computeFeatures(params, style_net, style_descrs, content_net, imag)
    style_net:forward(imgs)
    local res1 = {}
    for j, mod in ipairs(style_descrs) do
-      table.insert(res1, mod.output)
+      table.insert(res1, mod.G)
    end
    -- content features
    im = image.scale(imag, params.content_size, params.content_size, 'bilinear')
