@@ -37,6 +37,7 @@ cmd:option('-model_file', 'content.data')
 cmd:option('-backend', 'nn', 'nn|cudnn|clnn')
 cmd:option('-seed', -1)
 cmd:option('-print_memory', false)
+cmd:option('-flip', false)
 
 cmd:option('-content_layer', 37, 'layer to learn from') -- pool5
 cmd:option('-style_layers', '2,7', 'layers for style') -- relu1_1, relu2_1
