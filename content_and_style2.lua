@@ -395,7 +395,8 @@ function buildNet(params, res)
    qualitynet:add(nn.Linear(1024, 512))
    qualitynet:add(nn.ReLU())
    qualitynet:add(nn.Dropout(params.dropout))
-   qualitynet:add(nn.Linear(512, 1))
+   qualitynet:add(nn.Linear(512, 64))
+   qualitynet:add(nn.Max(1))
    if params.gpu >= 0 then
       if params.backend ~= 'clnn' then
           qualitynet:cuda()
