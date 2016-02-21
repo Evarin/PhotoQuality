@@ -143,6 +143,10 @@ local function main(params)
    local next_style_idx = 1
    local style_net = nn.Sequential()
    local content_net = nn.Sequential()
+   local content_net2 = nil
+   if qualitynet == nil then
+      content_net2 = nn.Sequential()
+   end
    local content_tocome = true
    print(#cnn)
    for i = 1, #cnn do
@@ -153,9 +157,9 @@ local function main(params)
 	 local layer_type = torch.type(layer)
 	 if next_style_idx <= #style_layers then
 	    style_net:add(layer)
-	 end
-	 if content_tocome then
 	    content_net:add(layer)
+	 elseif content_tocome then
+	    content_net2:add(layer)
 	 end
 	 if i == params.content_layer then
 	    print("Setting up content layer  ", i, ":", layer.name)
@@ -195,7 +199,7 @@ local function main(params)
    if qualitynet == nil then
       local img = image.load(images[1][1], 3)
       local res = computeFeatures(params, style_net, style_descrs, content_net, img)
-      qualitynet = buildNet(params, res)
+      qualitynet = buildNet(params, res, content_net2)
    else
       for i=1, #qualitynet.modules do
          local module = qualitynet.modules[i]
@@ -358,7 +362,7 @@ function shuffle(t)
    end
 end
 
-function buildNet(params, res)
+function buildNet(params, res, content_net2)
    local qualitynet = nn.Sequential()
    -- Style
    local pstyle = nn.ParallelTable()
@@ -377,7 +381,8 @@ function buildNet(params, res)
    lstyle:add(nn.Linear(nEl, 512))
    -- Content
    local lcontent = nn.Sequential()
-   local res2b = res[2]
+   local res2b = content_net2:forward(res[2])
+   lcontent:add(content_net2)
    lcontent:add(nn.View(res2b:nElement()))
    lcontent:add(nn.Linear(res2b:nElement(), 1024))
    -- Merge
